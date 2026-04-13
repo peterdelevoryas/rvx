@@ -1,0 +1,12 @@
+[package]
+name = "rvx-virt"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+libc.workspace = true
+rvx-core = { path = "../rvx-core" }
+rvx-riscv = { path = "../rvx-riscv" }
+serde.workspace = true
