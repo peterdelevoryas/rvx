@@ -640,9 +640,7 @@ impl VirtMachine {
                 }
                 hart.wfi = false;
             }
-            if let Some(trap) = hart.cpu.pending_interrupt() {
-                hart.cpu.csr.cycle = hart.cpu.csr.cycle.wrapping_add(1);
-                hart.cpu.take_trap(trap);
+            if take_pending_interrupt(&mut hart.cpu, hart_id, self.config.trace) {
                 return Ok(true);
             }
         }
@@ -736,6 +734,11 @@ impl VirtMachine {
                 burst_retired.wrapping_add(result.retired as u64)
             };
             burst_progress |= retired_delta != 0;
+            if result.status != BlockStatus::Trap
+                && take_pending_interrupt(&mut self.harts[hart_id].cpu, hart_id, self.config.trace)
+            {
+                return Ok(JitStepOutcome::Completed(true));
+            }
 
             match result.status {
                 BlockStatus::Continue => {
@@ -1820,9 +1823,7 @@ fn parallel_step_hart(
             }
             hart.wfi = false;
         }
-        if let Some(trap) = hart.cpu.pending_interrupt() {
-            hart.cpu.csr.cycle = hart.cpu.csr.cycle.wrapping_add(1);
-            hart.cpu.take_trap(trap);
+        if take_pending_interrupt(&mut hart.cpu, hart_id, shared.config.trace) {
             return Ok(ParallelStep {
                 progress: true,
                 retired_delta: 0,
@@ -1995,6 +1996,14 @@ fn parallel_execute_cached_block(
         .retired_instructions
         .fetch_add(result.retired as u64, Ordering::Relaxed);
     hart.cpu.csr.cycle = hart.cpu.csr.cycle.wrapping_add(result.retired as u64);
+    if result.status != BlockStatus::Trap
+        && take_pending_interrupt(&mut hart.cpu, hart_id, shared.config.trace)
+    {
+        return Ok(ParallelJitStepOutcome::Completed(ParallelStep {
+            progress: true,
+            retired_delta: result.retired as u64,
+        }));
+    }
 
     match result.status {
         BlockStatus::Continue => Ok(ParallelJitStepOutcome::Completed(ParallelStep {
@@ -2072,6 +2081,22 @@ fn parallel_build_jit_block(
     }
 
     Ok((!instructions.is_empty()).then_some(instructions))
+}
+
+fn take_pending_interrupt(cpu: &mut Cpu, hart_id: usize, trace: bool) -> bool {
+    let Some(trap) = cpu.pending_interrupt() else {
+        return false;
+    };
+    cpu.csr.cycle = cpu.csr.cycle.wrapping_add(1);
+    if trace {
+        eprintln!(
+            "rvx: async interrupt hart={hart_id} pc=0x{:016x} cause=0x{:016x}",
+            cpu.pc,
+            trap.cause(),
+        );
+    }
+    cpu.take_trap(trap);
+    true
 }
 
 fn block_cache_set_index(key: BlockKey) -> usize {

@@ -10,5 +10,6 @@ cranelift.workspace = true
 cranelift-jit.workspace = true
 cranelift-module.workspace = true
 cranelift-native.workspace = true
+libc.workspace = true
 rustc-hash.workspace = true
 rvx-core = { path = "../rvx-core" }

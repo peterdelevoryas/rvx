@@ -38,7 +38,7 @@ fn run_linux_boot(
     perf_json: &PathBuf,
     smp: u32,
     time_limit_ms: u64,
-    _write_rounds: usize,
+    prompt_input_delay: Duration,
     experimental_parallel: bool,
 ) -> Output {
     let _ = std::fs::remove_file(perf_json);
@@ -105,6 +105,9 @@ fn run_linux_boot(
             let guard = observed.lock().unwrap();
             if contains_shell_prompt(&guard) {
                 drop(guard);
+                if !prompt_input_delay.is_zero() {
+                    thread::sleep(prompt_input_delay);
+                }
                 let payload = b"echo hello world;/bin/rvx-poweroff\r";
                 let _ = child_stdin.write_all(payload);
                 let _ = child_stdin.flush();
@@ -189,7 +192,16 @@ fn linux_busybox_echo_hello_world() {
     let root = workspace_root();
     prepare_guest_artifacts(&root);
     let perf_json = root.join("target/linux_boot_perf.json");
-    let output = run_linux_boot(&root, &perf_json, 1, 105_000, 32, false);
+    let output = run_linux_boot(&root, &perf_json, 1, 105_000, Duration::ZERO, false);
+    assert_successful_busybox_boot(&output, &perf_json);
+}
+
+#[test]
+fn linux_busybox_echo_hello_world_after_delayed_prompt_input() {
+    let root = workspace_root();
+    prepare_guest_artifacts(&root);
+    let perf_json = root.join("target/linux_boot_perf_delayed_prompt.json");
+    let output = run_linux_boot(&root, &perf_json, 1, 105_000, Duration::from_secs(1), false);
     assert_successful_busybox_boot(&output, &perf_json);
 }
 
@@ -199,6 +211,6 @@ fn linux_busybox_echo_hello_world_threaded_smp() {
     let root = workspace_root();
     prepare_guest_artifacts(&root);
     let perf_json = root.join("target/linux_boot_perf_threaded_smp.json");
-    let output = run_linux_boot(&root, &perf_json, 4, 240_000, 90, true);
+    let output = run_linux_boot(&root, &perf_json, 4, 240_000, Duration::ZERO, true);
     assert_successful_busybox_boot(&output, &perf_json);
 }

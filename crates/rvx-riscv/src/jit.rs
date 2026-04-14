@@ -29,6 +29,8 @@ use crate::{
     StoreKind,
 };
 
+mod x64;
+
 const BLOCK_STATUS_CONTINUE: i64 = 0;
 const BLOCK_STATUS_TRAP: i64 = 1;
 const BLOCK_STATUS_CHAIN: i64 = 2;
@@ -100,6 +102,7 @@ pub struct CompiledBlock {
     pub instructions: Box<[JitInstruction]>,
     entry: CompiledBlockEntry,
     chain_entry: u64,
+    _code_owner: CompiledCodeOwner,
     chain_data: ChainData,
     writes_memory: bool,
     terminator: BlockTerminatorKind,
@@ -172,6 +175,19 @@ enum ChainCompileInfo {
     },
 }
 
+#[allow(dead_code)]
+enum CompiledCodeOwner {
+    Module,
+    #[cfg(all(target_arch = "x86_64", unix))]
+    X64(x64::ExecutableBlock),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JitBackend {
+    Cranelift,
+    X64Template,
+}
+
 pub struct JitEngine {
     module: JITModule,
     ctx: cranelift::codegen::Context,
@@ -189,6 +205,7 @@ pub struct JitEngine {
     block_chaining: bool,
     helper_only: bool,
     collect_mmu_stats: bool,
+    preferred_backend: JitBackend,
 }
 
 impl BlockKey {
@@ -212,6 +229,26 @@ pub fn jit_max_block_instructions() -> usize {
             .filter(|value| *value > 0)
             .unwrap_or(DEFAULT_JIT_MAX_BLOCK_INSTRUCTIONS)
     })
+}
+
+fn preferred_backend(block_chaining: bool, helper_only: bool) -> JitBackend {
+    if block_chaining || helper_only {
+        return JitBackend::Cranelift;
+    }
+    match std::env::var("RVX_JIT_BACKEND").ok().as_deref() {
+        Some("cranelift") => JitBackend::Cranelift,
+        Some("x64") | Some("x86_64") => JitBackend::X64Template,
+        _ => {
+            #[cfg(all(target_arch = "x86_64", unix))]
+            {
+                JitBackend::X64Template
+            }
+            #[cfg(not(all(target_arch = "x86_64", unix)))]
+            {
+                JitBackend::Cranelift
+            }
+        }
+    }
 }
 
 impl BlockExecution {
@@ -532,6 +569,7 @@ impl JitEngine {
         )?;
         let ctx = module.make_context();
         let builder_ctx = FunctionBuilderContext::new();
+        let preferred_backend = preferred_backend(block_chaining, helper_only);
         Ok(Self {
             module,
             ctx,
@@ -549,6 +587,7 @@ impl JitEngine {
             block_chaining,
             helper_only,
             collect_mmu_stats: std::env::var_os("RVX_MMU_STATS").is_some(),
+            preferred_backend,
         })
     }
 
@@ -642,7 +681,7 @@ impl JitEngine {
         if !self.blocks.contains_key(&key) {
             let instructions = instructions.into_boxed_slice();
             let chain_data = self.prepare_chain(key, &instructions);
-            let (entry, chain_entry) =
+            let (entry, chain_entry, code_owner) =
                 self.compile_entry(key, &instructions, chain_data.compile_info())?;
             let writes_memory = instructions
                 .iter()
@@ -653,6 +692,7 @@ impl JitEngine {
                 instructions,
                 entry,
                 chain_entry,
+                _code_owner: code_owner,
                 chain_data,
                 writes_memory,
                 terminator,
@@ -677,10 +717,16 @@ impl JitEngine {
         key: BlockKey,
         instructions: &[JitInstruction],
         chain_info: ChainCompileInfo,
-    ) -> Result<(CompiledBlockEntry, u64)> {
+    ) -> Result<(CompiledBlockEntry, u64, CompiledCodeOwner)> {
         let block_id = self.next_block_id;
         self.next_block_id = self.next_block_id.wrapping_add(1);
-        self.compile_systemv_entry(block_id, key, instructions, chain_info)
+        if matches!(self.preferred_backend, JitBackend::X64Template) {
+            if let Some((entry, code)) = x64::try_compile_block(key, instructions)? {
+                return Ok((entry, entry as usize as u64, CompiledCodeOwner::X64(code)));
+            }
+        }
+        let (entry, chain_entry) = self.compile_systemv_entry(block_id, key, instructions, chain_info)?;
+        Ok((entry, chain_entry, CompiledCodeOwner::Module))
     }
 
     fn compile_systemv_entry(
